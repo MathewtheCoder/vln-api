@@ -1,0 +1,15 @@
+[Unit]
+Description=VLN API
+
+[Service]
+Type=simple
+Restart=always
+Environment="RUST_LOG=warn"
+ExecStart=/valiu/valor 
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=app_vln_api
+
+[Install]
+WantedBy=multi-user.target
+

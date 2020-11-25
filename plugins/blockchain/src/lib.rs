@@ -1,7 +1,6 @@
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
+use valor::*;
+
+#[vlugin]
+fn handle_request(_req: Request) -> Response {
+    "Hello from plugin".into()
 }

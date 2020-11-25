@@ -8,3 +8,4 @@ edition = "2018"
 crate-type = ["cdylib"]
 
 [dependencies]
+valor = { version = "0.3.3", package = "valor-rs" }
