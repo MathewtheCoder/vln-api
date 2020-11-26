@@ -33,8 +33,6 @@ jobs:
     needs: build
     steps:
     - uses: actions/download-artifact@v2
-      with:
-        name: app.zip
     - name: S3 Upload
       uses: hannut91/aws-cli@1.18.65
       with:
