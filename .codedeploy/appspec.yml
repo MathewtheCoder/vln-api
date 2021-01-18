@@ -3,10 +3,10 @@ os: linux
 files:
         - source: app.service
           destination: /usr/lib/systemd/system/
-        - source: valor
-          destination: /valiu/
-        - source: out/
-          destination: /valiu/plugins
+        - source: .build/valor
+          destination: /valiu
+        - source: .build/plugins
+          destination: /valiu
 
 hooks:
         BeforeInstall:

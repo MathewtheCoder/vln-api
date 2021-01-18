@@ -1,10 +1,11 @@
 .PHONY: default clean build_plugins pack
 
-PLUGINS=blockchain
-OUT_DIR=out
-NATIVE_PLUGINS=$(PLUGINS:%=${OUT_DIR}/%.so)
+PLUGINS=vln
+OUT_DIR=.build
+NATIVE_PLUGINS=$(PLUGINS:%=${OUT_DIR}/plugins/%)
 CODEDEPLOY_FILES=$(shell find -L .codedeploy -type f)
-VALOR_BIN=$(shell which valor)
+VALOR_BIN=$(shell which valor_bin)
+VALOR_VER ?= 0.4.2-alpha.0
 
 default: build_plugins
 
@@ -15,14 +16,20 @@ build_plugins: $(NATIVE_PLUGINS)
 clean: 
 	rm -f $(NATIVE_PLUGINS) app.zip 
 
-app.zip: $(NATIVE_PLUGINS) 
+app.zip: $(OUT_DIR)/valor $(NATIVE_PLUGINS) 
 	@zip app -j $(CODEDEPLOY_FILES)
-	@zip app -j $(VALOR_BIN)
-	@zip app $^
+	@zip app $<
+	@zip app $(filter-out $<,$^)
 
 target/release/lib%.so:
 	cargo build -p $* --release
 
-$(OUT_DIR)/%.so: target/release/lib%.so
-	@mkdir -p ${OUT_DIR}
+$(VALOR_BIN):
+	cargo install valor_bin --version $(VALOR_BIN)
+
+$(OUT_DIR)/valor: $(VALOR_BIN)
+	@mkdir -p $(@D); cp $^ $@
+
+$(OUT_DIR)/plugins/%: target/release/lib%.so
+	@mkdir -p $(@D)
 	mv $^ $@ 
