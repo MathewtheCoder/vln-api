@@ -1,4 +1,5 @@
-# VLN API
+# Valiu Liquidity Network API
 
-A collection of modules/plugins exposed as HTTP API using [Valor](https://github.com/valibre-org/valor) which is focuded on decentralization running the same API in a server as well as a browser environment.  
-The API aims to be very high level and focused on easy of use for front-end applications like mobile or web apps, hidding away the complexities of underlying systems like blockchain transactions and secret key management.
+A high level HTTP API for client applications to easily interact with the services built around the [VLN blockchain](https://github.com/valibre-org/node).  
+It's developed as a collection of plugins run with [Valor](https://github.com/valibre-org/valor), our open runtime to create awesome decentralizable APIs that allows Rust and Javascript plugins to be run seamlessly in a server as well as a browser environment.  
+Focus is on simplicity of use for front-end applications, hidding away the complexities of underlying systems like blockchain transactions and secret key management.
