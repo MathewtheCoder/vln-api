@@ -5,6 +5,8 @@ files:
           destination: /usr/lib/systemd/system/
         - source: .build/valor
           destination: /valiu
+        - source: plugins.json
+          destination: /valiu
         - source: .build/plugins
           destination: /valiu
 

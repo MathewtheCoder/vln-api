@@ -5,7 +5,8 @@ Description=VLN API
 Type=simple
 Restart=always
 Environment="RUST_LOG=warn"
-ExecStart=/valiu/valor 
+Environment="LD_LIBRARY_PATH=/valiu/plugins"
+ExecStart=/valiu/valor -p /valiu/plugins.json
 StandardOutput=syslog
 StandardError=syslog
 SyslogIdentifier=app_vln_api
