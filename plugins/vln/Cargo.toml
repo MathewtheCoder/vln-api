@@ -10,12 +10,12 @@ jsonrpc = { version = "0.12.0", default-features = false }
 lazy_static = "1.4.0"
 path-tree = "0.1.12"
 surf = { version = "2.1.0", default-features = false, features = ["h1-client"] }
-valor = { version = "0.4.5-beta.0", package = "valor_core", features = ["util"] }
+valor = { version = "0.4.6-beta.0", package = "valor_core", features = ["util"] }
 frame-metadata = { git = "https://github.com/paritytech/frame-metadata.git", branch = "td-utils" }
 parity-scale-codec = "1.3.6"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-valor = { version = "0.4.5-beta.0", package = "valor_core", features = ["util", "web"] }
+valor = { version = "0.4.6-beta.0", package = "valor_core", features = ["util", "web"] }
 
 [lib]
 crate-type = ["cdylib", "lib"]
