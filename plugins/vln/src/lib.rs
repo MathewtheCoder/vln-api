@@ -1,82 +1,109 @@
-#[macro_use]
-extern crate lazy_static;
+mod meta_util;
 
-use frame_metadata::RuntimeMetadataPrefixed;
+use frame_metadata::{RuntimeMetadata, RuntimeMetadataPrefixed};
 use jsonrpc::serde_json::{to_string, value::RawValue};
+use meta_util::*;
+use once_cell::sync::OnceCell;
 use parity_scale_codec::Decode;
 use path_tree::PathTree;
+use std::borrow::Cow;
 use valor::*;
 
 const NODE_ENDPOINT: &str = "http://10.0.17.52:8080";
+static METADATA: OnceCell<RuntimeMetadata> = OnceCell::new();
 
-lazy_static! {
-    static ref PATH: PathTree<Action> = {
-        let mut p = PathTree::new();
-        p.insert("/meta", Action::Meta);
-        p.insert("/:module/:item", Action::Storage);
-        p
-    };
-}
-
-type Result<T> = core::result::Result<T, Error>;
-
-enum Action {
+enum Cmd {
     Meta,
     Storage,
 }
 
+type Result<T> = std::result::Result<T, Error>;
+
 #[vlugin]
 async fn vln(req: Request) -> Response {
-    use Method::*;
+    let routes = {
+        let mut p = PathTree::new();
+        p.insert("/meta", Cmd::Meta);
+        p.insert("/:module/:item", Cmd::Storage);
+        p
+    };
 
-    let action = PATH.find(req.url().path());
+    let url = req.url();
+    let action = routes.find(url.path());
     if action.is_none() {
         return StatusCode::NotFound.into();
     }
     let (action, params) = action.unwrap();
 
     match (req.method(), action) {
-        (Get, Action::Meta) => get_meta().await,
-        (Get, Action::Storage) => get_storage(params[0].1, params[1].1).await,
+        (Method::Get, Cmd::Meta) => get_meta().await,
+        (Method::Get, Cmd::Storage) => {
+            #[inline]
+            fn query_key<'a>(url: &'a Url, name: &str) -> Option<Cow<'a, str>> {
+                url.query_pairs().find(|k| k.0 == name).map(|k| k.1)
+            }
+            get_storage(
+                params[0].1,
+                params[1].1,
+                query_key(url, "k"),
+                query_key(url, "k2"),
+            )
+            .await
+        }
         _ => Ok(StatusCode::MethodNotAllowed.into()),
-    }.unwrap_or_else(Into::into)
+    }
+    .unwrap_or_else(Into::into)
 }
 
-// GET SCALE encoded metadata of the node
+/// GET the SCALE encoded metadata of the blockchain node
 async fn get_meta() -> Result<Response> {
-    rpc("state_getMetadata", &[])
-        .await
-        .and_then(meta_as_bytes)
-        .map(Into::into)
+    rpc("state_getMetadata", &[]).await.map(Into::into)
 }
 
-fn meta_as_bytes(data: Box<RawValue>) -> Result<Vec<u8>> {
-    let hex_value = &data.get().trim_matches('"')[2..];
-    hex::decode(hex_value).map_err(|_| Error::Decode)
-}
+async fn get_decoded_meta() -> Result<&'static RuntimeMetadata> {
+    let meta = METADATA.get();
+    if meta.is_some() {
+        return meta.ok_or(Error::Unknown);
+    }
 
-async fn get_and_decode_meta() -> Result<RuntimeMetadataPrefixed> {
     let meta = get_meta()
         .await?
         .body_bytes()
         .await
         .map_err(|_| Error::Unknown)
-        .and_then(|m| 
+        .and_then(|m| {
             RuntimeMetadataPrefixed::decode(&mut &*m)
-                .map_err(|_| Error::Decode)
-        );
-    meta
+                .map(|m| m.1)
+                .map_err(|e| Error::Decode(e.to_string()))
+        })?;
+    Ok(METADATA.get_or_init(|| meta))
 }
 
-// Query a storage value of the node
-async fn get_storage(_module: &str, _name: &str) -> Result<Response> {
-    let _meta = get_and_decode_meta().await?;
+/// Query a storage value of the node
+async fn get_storage(
+    module: &str,
+    name: &str,
+    _k1: Option<Cow<'_, str>>,
+    _k2: Option<Cow<'_, str>>,
+) -> Result<Response> {
+    let meta = get_decoded_meta().await?;
+    let entry = meta.entry(
+        &to_camel(&module.to_lowercase()),
+        &to_camel(&name.to_lowercase()),
+    );
+    if entry.is_none() {
+        return Ok(StatusCode::NotFound.into());
+    }
+    let entry = entry.unwrap();
+
+    let _key = entry.name.to_string();
+    // TODO get hashers for k1 and k2
     rpc("state_getStorage", &[]) // TODO
         .await
-        .map(|val| val.get().into())
+        .map(|val| val.into())
 }
 
-async fn rpc(method: &str, params: &[Box<RawValue>]) -> Result<Box<RawValue>> {
+async fn rpc(method: &str, params: &[&str]) -> Result<Vec<u8>> {
     surf::post(NODE_ENDPOINT)
         .content_type("application/json")
         .body(
@@ -84,7 +111,10 @@ async fn rpc(method: &str, params: &[Box<RawValue>]) -> Result<Box<RawValue>> {
                 id: 1.into(),
                 jsonrpc: Some("2.0"),
                 method,
-                params,
+                params: &params
+                    .iter()
+                    .map(|p| RawValue::from_string(p.to_string()).unwrap())
+                    .collect::<Vec<_>>(),
             })
             .unwrap(),
         )
@@ -95,13 +125,32 @@ async fn rpc(method: &str, params: &[Box<RawValue>]) -> Result<Box<RawValue>> {
         .map_err(|_| Error::InvalidJSON)?
         .result()
         .map_err(Error::from)
+        .and_then(|s: String| hex::decode(&s[2..]).map_err(Error::from))
+}
+
+fn to_camel(term: &str) -> String {
+    let underscore_count = term.chars().filter(|c| *c == '-').count();
+    let mut result = String::with_capacity(term.len() - underscore_count);
+    let mut at_new_word = true;
+
+    for c in term.chars().skip_while(|&c| c == '-') {
+        if c == '-' {
+            at_new_word = true;
+        } else if at_new_word {
+            result.push(c.to_ascii_uppercase());
+            at_new_word = false;
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 enum Error {
     NodeConnection,
     InvalidJSON,
     Rpc(String),
-    Decode,
+    Decode(String),
     Unknown,
 }
 
@@ -109,13 +158,19 @@ impl From<Error> for Response {
     fn from(e: Error) -> Self {
         match e {
             Error::NodeConnection => StatusCode::BadGateway.into(),
-            Error::Rpc(m) => {
+            Error::Rpc(e) | Error::Decode(e) => {
                 let mut res = Response::new(StatusCode::InternalServerError);
-                res.set_body(m);
+                res.set_body(e);
                 res
-            },
-            _ => StatusCode::InternalServerError.into()
+            }
+            _ => StatusCode::InternalServerError.into(),
         }
+    }
+}
+
+impl From<hex::FromHexError> for Error {
+    fn from(err: hex::FromHexError) -> Self {
+        Error::Decode(err.to_string())
     }
 }
 
