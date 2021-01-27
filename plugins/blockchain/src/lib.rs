@@ -1,6 +1,6 @@
 mod meta_util;
 
-use frame_metadata::{RuntimeMetadata, RuntimeMetadataPrefixed};
+use frame_metadata::{RuntimeMetadata, RuntimeMetadataPrefixed, StorageEntryType};
 use jsonrpc::serde_json::{to_string, value::RawValue};
 use meta_util::*;
 use once_cell::sync::OnceCell;
@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use valor::*;
 
 const NODE_ENDPOINT: &str = "http://10.0.17.52:8080";
+
 static METADATA: OnceCell<RuntimeMetadata> = OnceCell::new();
 
 enum Cmd {
@@ -20,7 +21,7 @@ enum Cmd {
 type Result<T> = std::result::Result<T, Error>;
 
 #[vlugin]
-async fn vln(req: Request) -> Response {
+async fn blockchain_handler(req: Request) -> Response {
     let routes = {
         let mut p = PathTree::new();
         p.insert("/meta", Cmd::Meta);
@@ -87,20 +88,42 @@ async fn get_storage(
     _k2: Option<Cow<'_, str>>,
 ) -> Result<Response> {
     let meta = get_decoded_meta().await?;
-    let entry = meta.entry(
-        &to_camel(&module.to_lowercase()),
-        &to_camel(&name.to_lowercase()),
-    );
+    let module_name = to_camel(&module.to_lowercase());
+    let entry = meta.entry(&module_name, &to_camel(&name.to_lowercase()));
     if entry.is_none() {
         return Ok(StatusCode::NotFound.into());
     }
     let entry = entry.unwrap();
 
-    let _key = entry.name.to_string();
-    // TODO get hashers for k1 and k2
-    rpc("state_getStorage", &[]) // TODO
-        .await
-        .map(|val| val.into())
+    let mut key = hash_key(&module_name);
+    key.push_str(&hash_key(&entry.name.to_string()));
+
+    let key = format!(
+        "\"0x{}\"",
+        match entry.ty {
+            StorageEntryType::Plain(_) => key,
+            StorageEntryType::Map { .. } => todo!(),
+            StorageEntryType::DoubleMap { .. } => todo!(),
+        }
+    );
+
+    rpc("state_getStorage", &[&key]).await.map(|val| val.into())
+}
+
+fn hash_key(key: &str) -> String {
+    use core::hash::Hasher;
+    let mut dest: [u8; 16] = [0; 16];
+
+    let mut h0 = twox_hash::XxHash64::with_seed(0);
+    let mut h1 = twox_hash::XxHash64::with_seed(1);
+    h0.write(key.as_bytes());
+    h1.write(key.as_bytes());
+    let r0 = h0.finish();
+    let r1 = h1.finish();
+    use byteorder::{ByteOrder, LittleEndian};
+    LittleEndian::write_u64(&mut dest[0..8], r0);
+    LittleEndian::write_u64(&mut dest[8..16], r1);
+    hex::encode(dest)
 }
 
 async fn rpc(method: &str, params: &[&str]) -> Result<Vec<u8>> {
@@ -125,7 +148,10 @@ async fn rpc(method: &str, params: &[&str]) -> Result<Vec<u8>> {
         .map_err(|_| Error::InvalidJSON)?
         .result()
         .map_err(Error::from)
-        .and_then(|s: String| hex::decode(&s[2..]).map_err(Error::from))
+        .and_then(|s: String| {
+            println!("{}", s);
+            hex::decode(&s[2..]).map_err(Error::from)
+        })
 }
 
 fn to_camel(term: &str) -> String {
