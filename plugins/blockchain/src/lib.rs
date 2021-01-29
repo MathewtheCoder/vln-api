@@ -1,15 +1,20 @@
-mod meta_util;
+mod util_hash;
+mod util_meta;
 
-use frame_metadata::{RuntimeMetadata, RuntimeMetadataPrefixed, StorageEntryType};
+use frame_metadata::{RuntimeMetadata, RuntimeMetadataPrefixed, StorageEntryType, StorageHasher};
+use http::{content::Accept, mime, Mime};
 use jsonrpc::serde_json::{to_string, value::RawValue};
-use meta_util::*;
 use once_cell::sync::OnceCell;
 use parity_scale_codec::Decode;
 use path_tree::PathTree;
 use std::borrow::Cow;
+use util_hash::hash;
+use util_meta::MetaExt;
 use valor::*;
 
 const NODE_ENDPOINT: &str = "http://10.0.17.52:8080";
+const SCALE_MIME: &str = "application/scale";
+const BASE58_MIME: &str = "application/base58";
 
 static METADATA: OnceCell<RuntimeMetadata> = OnceCell::new();
 
@@ -36,14 +41,28 @@ async fn blockchain_handler(req: Request) -> Response {
     }
     let (action, params) = action.unwrap();
 
+    // Use content negotiation to determine the response type
+    // By default return data in SCALE encoded binary format
+    let response_type = Accept::from_headers(&req)
+        .expect("Valid Accept header")
+        .unwrap_or_else(Accept::new)
+        .negotiate(&[
+            mime::PLAIN.essence().into(),
+            SCALE_MIME.into(),
+            BASE58_MIME.into(),
+        ])
+        .map(|c| c.value().as_str().into())
+        .unwrap_or_else(|_| SCALE_MIME.into());
+
     match (req.method(), action) {
-        (Method::Get, Cmd::Meta) => get_meta().await,
+        (Method::Get, Cmd::Meta) => get_meta(&response_type).await,
         (Method::Get, Cmd::Storage) => {
             #[inline]
             fn query_key<'a>(url: &'a Url, name: &str) -> Option<Cow<'a, str>> {
                 url.query_pairs().find(|k| k.0 == name).map(|k| k.1)
             }
             get_storage(
+                &response_type,
                 params[0].1,
                 params[1].1,
                 query_key(url, "k"),
@@ -57,8 +76,10 @@ async fn blockchain_handler(req: Request) -> Response {
 }
 
 /// GET the SCALE encoded metadata of the blockchain node
-async fn get_meta() -> Result<Response> {
-    rpc("state_getMetadata", &[]).await.map(Into::into)
+async fn get_meta(mime: &Mime) -> Result<Response> {
+    rpc("state_getMetadata", &[])
+        .await
+        .map(|r| response_from_type(mime, r))
 }
 
 async fn get_decoded_meta() -> Result<&'static RuntimeMetadata> {
@@ -67,7 +88,7 @@ async fn get_decoded_meta() -> Result<&'static RuntimeMetadata> {
         return meta.ok_or(Error::Unknown);
     }
 
-    let meta = get_meta()
+    let meta = get_meta(&SCALE_MIME.into())
         .await?
         .body_bytes()
         .await
@@ -82,10 +103,11 @@ async fn get_decoded_meta() -> Result<&'static RuntimeMetadata> {
 
 /// Query a storage value of the node
 async fn get_storage(
+    mime: &Mime,
     module: &str,
     name: &str,
-    _k1: Option<Cow<'_, str>>,
-    _k2: Option<Cow<'_, str>>,
+    k1: Option<Cow<'_, str>>,
+    k2: Option<Cow<'_, str>>,
 ) -> Result<Response> {
     let meta = get_decoded_meta().await?;
     let module_name = to_camel(&module.to_lowercase());
@@ -95,38 +117,58 @@ async fn get_storage(
     }
     let entry = entry.unwrap();
 
-    let mut key = hash_key(&module_name);
-    key.push_str(&hash_key(&entry.name.to_string()));
+    // Storage keys are prefixed with the module name + storage item
+    let mut key = hash(&StorageHasher::Twox128, &module_name);
+    key.push_str(&hash(&StorageHasher::Twox128, &entry.name.to_string()));
 
     let key = format!(
         "\"0x{}\"",
         match entry.ty {
             StorageEntryType::Plain(_) => key,
-            StorageEntryType::Map { .. } => todo!(),
-            StorageEntryType::DoubleMap { .. } => todo!(),
+            StorageEntryType::Map { ref hasher, .. } => {
+                if k1.is_none() || k1.as_ref().unwrap().is_empty() {
+                    return Ok(StatusCode::BadRequest.into());
+                }
+                key.push_str(&hash(hasher, &k1.unwrap()));
+                println!("> {}", key);
+                key
+            }
+            StorageEntryType::DoubleMap {
+                ref hasher,
+                ref key2_hasher,
+                ..
+            } => {
+                if (k1.is_none() || k1.as_ref().unwrap().is_empty())
+                    || (k2.is_none() || k2.as_ref().unwrap().is_empty())
+                {
+                    return Ok(StatusCode::BadRequest.into());
+                }
+                key.push_str(&hash(hasher, &k1.unwrap()));
+                key.push_str(&hash(key2_hasher, &k2.unwrap()));
+                key
+            }
         }
     );
 
-    rpc("state_getStorage", &[&key]).await.map(|val| val.into())
+    rpc("state_getStorage", &[&key])
+        .await
+        .map(|res| response_from_type(mime, res))
 }
 
-fn hash_key(key: &str) -> String {
-    use core::hash::Hasher;
-    let mut dest: [u8; 16] = [0; 16];
-
-    let mut h0 = twox_hash::XxHash64::with_seed(0);
-    let mut h1 = twox_hash::XxHash64::with_seed(1);
-    h0.write(key.as_bytes());
-    h1.write(key.as_bytes());
-    let r0 = h0.finish();
-    let r1 = h1.finish();
-    use byteorder::{ByteOrder, LittleEndian};
-    LittleEndian::write_u64(&mut dest[0..8], r0);
-    LittleEndian::write_u64(&mut dest[8..16], r1);
-    hex::encode(dest)
+fn response_from_type(mime: &Mime, res: String) -> Response {
+    use base58::ToBase58;
+    let bytes = || hex::decode(&res[2..]).unwrap();
+    let mut res: Response = match mime.essence() {
+        "text/plain" => res.into(),
+        BASE58_MIME => bytes().to_base58().into(),
+        _ => bytes().into(),
+    };
+    res.set_content_type(mime.clone());
+    res
 }
 
-async fn rpc(method: &str, params: &[&str]) -> Result<Vec<u8>> {
+/// HTTP based JSONRpc request expecting an hex encoded result
+async fn rpc(method: &str, params: &[&str]) -> Result<String> {
     surf::post(NODE_ENDPOINT)
         .content_type("application/json")
         .body(
@@ -148,35 +190,14 @@ async fn rpc(method: &str, params: &[&str]) -> Result<Vec<u8>> {
         .map_err(|_| Error::InvalidJSON)?
         .result()
         .map_err(Error::from)
-        .and_then(|s: String| {
-            println!("{}", s);
-            hex::decode(&s[2..]).map_err(Error::from)
-        })
 }
 
-fn to_camel(term: &str) -> String {
-    let underscore_count = term.chars().filter(|c| *c == '-').count();
-    let mut result = String::with_capacity(term.len() - underscore_count);
-    let mut at_new_word = true;
-
-    for c in term.chars().skip_while(|&c| c == '-') {
-        if c == '-' {
-            at_new_word = true;
-        } else if at_new_word {
-            result.push(c.to_ascii_uppercase());
-            at_new_word = false;
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-enum Error {
+pub enum Error {
     NodeConnection,
     InvalidJSON,
     Rpc(String),
     Decode(String),
+    EmptyResponse,
     Unknown,
 }
 
@@ -184,6 +205,7 @@ impl From<Error> for Response {
     fn from(e: Error) -> Self {
         match e {
             Error::NodeConnection => StatusCode::BadGateway.into(),
+            Error::EmptyResponse => StatusCode::NotFound.into(),
             Error::Rpc(e) | Error::Decode(e) => {
                 let mut res = Response::new(StatusCode::InternalServerError);
                 res.set_body(e);
@@ -204,7 +226,26 @@ impl From<jsonrpc::Error> for Error {
     fn from(err: jsonrpc::Error) -> Self {
         match err {
             jsonrpc::Error::Rpc(e) => Error::Rpc(e.message),
+            jsonrpc::Error::Json(_) => Error::EmptyResponse,
             _ => Error::Unknown,
         }
     }
+}
+
+fn to_camel(term: &str) -> String {
+    let underscore_count = term.chars().filter(|c| *c == '-').count();
+    let mut result = String::with_capacity(term.len() - underscore_count);
+    let mut at_new_word = true;
+
+    for c in term.chars().skip_while(|&c| c == '-') {
+        if c == '-' {
+            at_new_word = true;
+        } else if at_new_word {
+            result.push(c.to_ascii_uppercase());
+            at_new_word = false;
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
