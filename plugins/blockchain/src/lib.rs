@@ -12,7 +12,7 @@ use util_hash::hash;
 use util_meta::MetaExt;
 use valor::*;
 
-const NODE_ENDPOINT: &str = "http://10.0.17.52:8080";
+const NODE_ENDPOINT: &str = "http://vln.valiu";
 const SCALE_MIME: &str = "application/scale";
 const BASE58_MIME: &str = "application/base58";
 
